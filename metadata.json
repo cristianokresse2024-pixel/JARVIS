@@ -1,0 +1,5 @@
+{
+  "name": "J.A.R.V.I.S. Interface",
+  "description": "Assistente virtual com interface HUD tecnológica, acesso à câmera, microfone e tela.",
+  "requestFramePermissions": ["camera", "microphone", "display-capture", "geolocation"]
+}
