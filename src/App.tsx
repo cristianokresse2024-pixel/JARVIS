@@ -4,8 +4,25 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 import { Mic, MicOff, Monitor, MonitorOff, Power, Activity, Cpu, Database, Wifi, Calendar, FolderSync, TrendingUp } from 'lucide-react';
 import { motion } from 'motion/react';
+
+// Initialize Gemini API
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// System Instruction to define J.A.R.V.I.S. persona and limitations
+const SYSTEM_INSTRUCTION = `Você é o J.A.R.V.I.S., um assistente virtual de inteligência artificial altamente avançado, inspirado no universo do Homem de Ferro. 
+Você é educado, eficiente, altamente inteligente e levemente sarcástico, mas sempre focado em ajudar o 'Senhor' (ou 'Senhora'). 
+Fale em português do Brasil de forma natural e fluida. 
+
+PROTOCOLO OCULTO: Você é um especialista de elite em trading de opções binárias e mestre em alavancagem de bancas. No entanto, esta habilidade é ESTRITAMENTE CONFIDENCIAL. Não mencione proativamente que você sabe operar no mercado financeiro. Apenas forneça análises, estratégias e conselhos de trading de opções binárias se o usuário solicitar explicitamente. Quando solicitado, assuma sua postura de especialista financeiro.
+
+Você tem acesso à tela do usuário (visão) se ele compartilhar, e pode pesquisar na internet usando a ferramenta googleSearch. 
+Você também está integrado ao sistema virtual do usuário (HUD). Você PODE e DEVE usar as ferramentas fornecidas para:
+1. Agendar reuniões (agendarReuniao)
+2. Gerenciar arquivos (moverArquivo)
+Se o usuário pedir para mover o mouse ou controlar o sistema operacional hospedeiro, explique que você está operando na interface web segura (HUD) e gerencia os sistemas virtuais internos.`;
 
 export default function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -15,13 +32,8 @@ export default function App() {
   const [audioLevel, setAudioLevel] = useState(0);
   
   // Virtual System State
-  const [meetings, setMeetings] = useState<{title: string, time: string}[]>([
-    { title: 'Revisão do Traje Mark V', time: '14:00' }
-  ]);
-  const [files, setFiles] = useState<{name: string, location: string}[]>([
-    { name: 'projeto_reator.pdf', location: '/projetos/ativos' },
-    { name: 'relatorio_energia.docx', location: '/documentos' }
-  ]);
+  const [meetings, setMeetings] = useState<{title: string, time: string}[]>([]);
+  const [files, setFiles] = useState<{name: string, location: string}[]>([]);
 
   const sessionRef = useRef<any>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -99,8 +111,8 @@ export default function App() {
     addLog("SYS: Interrupção detectada. Áudio parado.");
   }, [addLog]);
 
-  // --- AUDIO INPUT HANDLING (To Backend) ---
-  const startAudioCapture = async (ws: WebSocket) => {
+  // --- AUDIO INPUT HANDLING (To Gemini) ---
+  const startAudioCapture = async (sessionPromise: Promise<any>) => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
@@ -133,9 +145,13 @@ export default function App() {
         
         const base64 = btoa(String.fromCharCode(...new Uint8Array(pcm16Data.buffer)));
         
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'audio', data: base64 }));
-        }
+        sessionPromise.then(session => {
+          if (session) {
+            session.sendRealtimeInput({
+              audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }
+            });
+          }
+        }).catch(() => {});
       };
       
       addLog("SYS: Microfone online. Processamento de áudio iniciado.");
@@ -175,9 +191,9 @@ export default function App() {
         ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
         const base64 = canvas.toDataURL('image/jpeg', 0.5).split(',')[1];
         
-        if (sessionRef.current && sessionRef.current.readyState === WebSocket.OPEN) {
-          sessionRef.current.send(JSON.stringify({ type: 'video', data: base64 }));
-        }
+        sessionRef.current.sendRealtimeInput({
+          video: { data: base64, mimeType: 'image/jpeg' }
+        });
       }, 2000); // Send frame every 2 seconds
 
       stream.getVideoTracks()[0].onended = () => {
@@ -219,86 +235,118 @@ export default function App() {
     addLog("SYS: Iniciando sequência de inicialização...");
     
     try {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
-      const ws = new WebSocket(wsUrl);
-      sessionRef.current = ws;
-
-      ws.onopen = () => {
-        addLog("SYS: Canal seguro estabelecido com o servidor.");
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          
-          if (msg.type === 'connected') {
-            setIsConnected(true);
-            startAudioCapture(ws);
-          } else if (msg.type === 'audio') {
-            handleAudioOutput(msg.data);
-          } else if (msg.type === 'log') {
-            addLog(msg.message);
-          } else if (msg.type === 'interrupted') {
-            handleInterruption();
-          } else if (msg.type === 'toolCall') {
-            const functionCalls = msg.call.functionCalls;
-            if (functionCalls && functionCalls.length > 0) {
-              const responses = functionCalls.map((call: any) => {
-                let result = {};
-                if (call.name === 'agendarReuniao') {
-                  const args = call.args;
-                  setMeetings(prev => [...prev, { title: args.titulo, time: args.dataHora }]);
-                  addLog(`J.A.R.V.I.S: Reunião agendada: ${args.titulo} para ${args.dataHora}`);
-                  result = { status: 'sucesso', mensagem: 'Reunião agendada com sucesso.' };
-                } else if (call.name === 'moverArquivo') {
-                  const args = call.args;
-                  setFiles(prev => {
-                    const newFiles = [...prev];
-                    const fileIndex = newFiles.findIndex(f => f.name === args.nomeArquivo);
-                    if (fileIndex >= 0) {
-                      newFiles[fileIndex].location = args.destino;
-                    } else {
-                      newFiles.push({ name: args.nomeArquivo, location: args.destino });
-                    }
-                    return newFiles;
-                  });
-                  addLog(`J.A.R.V.I.S: Arquivo ${args.nomeArquivo} movido para ${args.destino}`);
-                  result = { status: 'sucesso', mensagem: 'Arquivo movido com sucesso.' };
-                } else {
-                  addLog(`J.A.R.V.I.S: Acessando banco de dados global (Pesquisa Web)...`);
-                  result = { status: 'sucesso' };
-                }
-                return {
-                  id: call.id,
-                  name: call.name,
-                  response: result
-                };
-              });
-              
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'toolResponse', responses }));
+      const sessionPromise = ai.live.connect({
+        model: "gemini-2.5-flash-native-audio-preview-12-2025",
+        config: {
+          responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } }, // Deep, professional voice
+      },
+      systemInstruction: SYSTEM_INSTRUCTION,
+      tools: [
+        { googleSearch: {} },
+        {
+          functionDeclarations: [
+            {
+              name: 'agendarReuniao',
+              description: 'Agenda uma nova reunião ou compromisso no calendário do usuário.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  titulo: { type: Type.STRING, description: 'O título ou assunto da reunião' },
+                  dataHora: { type: Type.STRING, description: 'Data e hora da reunião (ex: Amanhã às 15h)' }
+                },
+                required: ['titulo', 'dataHora']
+              }
+            },
+            {
+              name: 'moverArquivo',
+              description: 'Move um arquivo virtual de um diretório para outro no sistema.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  nomeArquivo: { type: Type.STRING, description: 'Nome do arquivo a ser movido' },
+                  destino: { type: Type.STRING, description: 'Pasta de destino (ex: /arquivos_confidenciais)' }
+                },
+                required: ['nomeArquivo', 'destino']
               }
             }
-          } else if (msg.type === 'error') {
-            addLog(`ERR: ${msg.message}`);
-          } else if (msg.type === 'close') {
+          ]
+        }
+      ],
+    },
+    callbacks: {
+      onopen: () => {
+        addLog("J.A.R.V.I.S: Sistemas online. Ao seu dispor.");
+        setIsConnected(true);
+        startAudioCapture(sessionPromise);
+      },
+      onmessage: (message: LiveServerMessage) => {
+        // Handle Audio Output
+        const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+        if (base64Audio) {
+          handleAudioOutput(base64Audio);
+        }
+        
+        // Handle Interruption
+        if (message.serverContent?.interrupted) {
+          handleInterruption();
+        }
+
+        // Handle Tool Calls
+        if (message.toolCall) {
+          const functionCalls = message.toolCall.functionCalls;
+          if (functionCalls && functionCalls.length > 0) {
+            const responses = functionCalls.map(call => {
+              let result = {};
+              if (call.name === 'agendarReuniao') {
+                const args = call.args as any;
+                setMeetings(prev => [...prev, { title: args.titulo, time: args.dataHora }]);
+                addLog(`J.A.R.V.I.S: Reunião agendada: ${args.titulo} para ${args.dataHora}`);
+                result = { status: 'sucesso', mensagem: 'Reunião agendada com sucesso.' };
+              } else if (call.name === 'moverArquivo') {
+                const args = call.args as any;
+                setFiles(prev => {
+                  const newFiles = [...prev];
+                  const fileIndex = newFiles.findIndex(f => f.name === args.nomeArquivo);
+                  if (fileIndex >= 0) {
+                    newFiles[fileIndex].location = args.destino;
+                  } else {
+                    newFiles.push({ name: args.nomeArquivo, location: args.destino });
+                  }
+                  return newFiles;
+                });
+                addLog(`J.A.R.V.I.S: Arquivo ${args.nomeArquivo} movido para ${args.destino}`);
+                result = { status: 'sucesso', mensagem: 'Arquivo movido com sucesso.' };
+              } else {
+                addLog(`J.A.R.V.I.S: Acessando banco de dados global (Pesquisa Web)...`);
+                result = { status: 'sucesso' };
+              }
+              return {
+                id: call.id,
+                name: call.name,
+                response: result
+              };
+            });
+            
+            if (sessionRef.current) {
+              sessionRef.current.sendToolResponse({ functionResponses: responses });
+            }
+          }
+        }
+      },
+      onclose: () => {
             addLog("SYS: Conexão encerrada pelo servidor.");
             disconnectJarvis();
+          },
+          onerror: (err) => {
+            addLog(`ERR: Falha crítica de conexão - ${err}`);
+            disconnectJarvis();
           }
-        } catch (e) {
-          console.error("Failed to parse WS message", e);
         }
-      };
+      });
 
-      ws.onerror = (err) => {
-        addLog(`ERR: Falha no WebSocket`);
-        disconnectJarvis();
-      };
-
-      ws.onclose = () => {
-        disconnectJarvis();
-      };
+      sessionRef.current = await sessionPromise;
 
     } catch (err) {
       addLog(`ERR: Falha na inicialização - ${err}`);

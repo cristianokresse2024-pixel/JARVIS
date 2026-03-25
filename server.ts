@@ -5,6 +5,11 @@ import http from 'http';
 import path from 'path';
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 
+// Polyfill WebSocket for Node.js environments that don't have it globally
+if (typeof global.WebSocket === 'undefined') {
+  (global as any).WebSocket = WebSocket;
+}
+
 const PORT = 3000;
 
 const SYSTEM_INSTRUCTION = `Você é o J.A.R.V.I.S., um assistente virtual de inteligência artificial altamente avançado, inspirado no universo do Homem de Ferro. 
@@ -58,7 +63,6 @@ async function startServer() {
           },
           systemInstruction: SYSTEM_INSTRUCTION,
           tools: [
-            { googleSearch: {} },
             {
               functionDeclarations: [
                 {
@@ -114,7 +118,7 @@ async function startServer() {
           },
           onerror: (err) => {
             console.error('Gemini Live API error:', err);
-            ws.send(JSON.stringify({ type: 'error', message: String(err) }));
+            ws.send(JSON.stringify({ type: 'error', message: 'Erro de conexão com o núcleo de IA.' }));
           },
           onclose: () => {
             console.log('Gemini Live API closed');
@@ -122,6 +126,12 @@ async function startServer() {
           }
         }
       });
+
+      sessionPromise.catch((err: any) => {
+        console.error('Failed to connect to Gemini Live API:', err);
+        ws.send(JSON.stringify({ type: 'error', message: 'Erro na API Gemini: ' + (err.message || String(err)) }));
+      });
+
     } catch (err) {
       console.error('Failed to initialize Gemini session:', err);
       ws.send(JSON.stringify({ type: 'error', message: 'Falha ao inicializar o núcleo de IA.' }));
